@@ -5,6 +5,7 @@ use FindBin '$Bin';
 use Data::Validate::IP qw(is_ipv4 is_ipv6);
 use Getopt::Std;
 use Fcntl ':flock';
+use File::Temp qw(tempfile);
 open my $self, '<', $0 or die "Couldn't open self: $!";
 flock $self, LOCK_EX | LOCK_NB or die "This script is already running";
 no if ($] >= 5.018), 'warnings' => 'experimental::smartmatch';
@@ -33,8 +34,8 @@ my $wget        = "wget";
 ## plain variables ##
 my($row, $Blocklist, $line, $check, $checkLine, $result, $output, $url, $ipRegex, $message, %opt, $opt);
 
-my ($added, $count, $removed, $skipped);
-$added = $count = $removed = $skipped = 0;
+my ($added, $count, $removed, $skipped, $added_ipv4, $added_ipv6);
+$added = $count = $removed = $skipped = $added_ipv4 = $added_ipv6 = 0;
 
 ## init arrays ##
 my @fileArray = ();
@@ -52,6 +53,10 @@ my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime();
 my @months = qw( Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec );
 my @days = qw(Sun Mon Tue Wed Thu Fri Sat Sun);
 
+my $TABLE = "blocklist";
+my $tmp_v4 = new File::Temp( UNLINK => 1);
+my $tmp_v6 = new File::Temp( UNLINK => 1);
+
 &init();
 
 ############# init ##################
@@ -64,6 +69,7 @@ sub init {
     getopts( "$opt", \%opt );
     usage() if $opt{h};
     cleanupAll() if $opt{c};
+    exit if $opt{c};
     # else start main subroutine
     main();
 }
@@ -89,13 +95,19 @@ EOF
 #****************************#
 sub main {
     logging("Starting blocklist refresh");
-    &nftablesCheck();
+    logging("Removing Blocklist Tables");
+    &cleanupAll();
+    logging("Generating Whitelist Array");
     &getWhiteListArray();
+    logging("Generating Blacklist Array");
     &getBlackListArray();
+    logging("Generating Blocklist Array");
     &getFileArray();
-    &getIpsetArray();
+    logging("Adding IPs to Blocklist");
     &addIpsToBlocklist();
-    &remIpsFromBlocklist();
+    logging("Adding Blocklist to ruleset");
+    &applyBlocklist();
+    logging("Starting Cleanup");
     &cleanup();
 
     exit;
@@ -106,49 +118,6 @@ sub main {
 #****************************#
 #******* Subroutines ********#
 #****************************#
-
-
-
-############# nftablesCheck ###############
-## checks if all necessary               ##
-## nftable/ipset Settings have been set  ##
-###########################################
-
-sub nftablesCheck {
-    ## Do we have an ipset list called blocklist?
-    if(`$nft list ruleset ip | $grep blocklist` =~ m/blocklist/ && `$nft list ruleset ip6 | $grep blocklist` =~ m/blocklist/  ) {
-        # Do nothing
-    } else {
-	`$nft add table blocklist`;
-	`$nft add set blocklist ipv4 { type ipv4_addr\\;}`;
-	`$nft add table ip6 blocklist`;
-	`$nft add set ip6 blocklist ipv6 { type ipv6_addr\\;}`;
-	$message = "Created ipset list blocklist";
-	logging($message);
-    }
-    ## Do we have an INPUT/DROP Chain in nftables?
-    if (`$nft list ruleset ip | $grep input` =~ m/chain input/) {
-        # Do nothing...
-    } else {
-        $message = "Creating Chain input";
-        logging($message);
-        `$nft add chain ip blocklist input {type filter hook input priority 100\\; policy accept\\;}`;
-        `$nft add rule ip blocklist input ip saddr \@ipv4 log prefix \\"Blocklist Dropped: \\" drop`;
-    }
-
-    ## Do we have an INPUT/DROP Chain in ip6tables?
-    if (`$nft list ruleset ip6 | $grep input` =~ m/chain input/) {
-        # Do nothing...
-    } else {
-        $message = "Creating Chain input";
-        logging($message);
-        `$nft add chain ip6 blocklist input {type filter hook input priority 100\\; policy accept\\;}`;
-        `$nft add rule ip6 blocklist input ip6 saddr \@ipv6 log prefix \\"Blocklist Dropped: \\" drop`;
-    }
-}
-
-######## END nftablesCheck ########
-
 
 ########## getFileArray #############
 ## downloads the Blocklist.txt and ##
@@ -170,32 +139,6 @@ sub getFileArray {
     %fileArray = map {$_ => 1 } @fileArray;
 }
 ####### END getFileArray ##########
-
-######### getIpsetArray ##########
-## runs ipset list blocklist    ##
-## and pushes it into           ##
-## array ipsetList              ##
-##################################
-
-sub getIpsetArray {
-    $output = `$nft list set ip blocklist ipv4`;
-    $output .= `$nft list set ip6 blocklist ipv6`;
-    @ipsetArray = (split /elements = \{ (.*?)\}/, $output)[1,3];
-    if ((defined $ipsetArray[0]) && (defined $ipsetArray[1]))
-    {
-        %ipsetArray = map { $_ => 1} split /, /,$ipsetArray[0].", ".$ipsetArray[1];
-    }
-    elsif (defined $ipsetArray[0])
-    {
-	%ipsetArray = map { $_ => 1} split /, /,$ipsetArray[0];
-    }
-    elsif (defined $ipsetArray[1])
-    {
-	%ipsetArray = map { $_ => 1} split /, /,$ipsetArray[1];
-    }
-}
-
-##### END getIpsetArray #########
 
 ######### getWhiteListArray ######
 ## puts all ips from our        ##
@@ -236,19 +179,31 @@ sub getBlackListArray {
 #################################
 
 sub addIpsToBlocklist {
+    print $tmp_v4 "table ip $TABLE {
+\tset ipv4 {
+\t\ttype ipv4_addr
+\t\tflags interval
+\t\telements = {\n";
+    print $tmp_v6 "table ip6 $TABLE {
+\tset ipv6 {
+\t\ttype ipv6_addr
+\t\tflags interval
+\t\telements = {\n";
     foreach $line (uniq(@blackListArray)) {
         if ((exists $ipsetArray{"$line"}) ||    ($line ~~ @whiteListArray)) {
             $skipped++;
         } else {
             if (is_ipv4($line) || is_ipv6($line)) {
                 if(is_ipv4($line)) {
-                    $result = `$nft add element ip blocklist ipv4 { $line }`;
+			print $tmp_v4 "\t\t\t$line,\n";
+			$added_ipv4++;
                 } else {
-                    $result = `$nft add element ip6 blocklist ipv6 { $line }`;
+			print $tmp_v6 "\t\t\t$line,\n";
+			$added_ipv6++;
                 }
                 $added++;
-                $message = "added $line";
-                logging($message);
+		#$message = "added $line";
+		#logging($message);
             } else {
                 $skipped++;
             }
@@ -260,66 +215,55 @@ sub addIpsToBlocklist {
         } else {
             if (is_ipv4($line) || is_ipv6($line)) {
                 if(is_ipv4($line)) {
-                    $result = `$nft add element ip blocklist ipv4 { $line }`;
+			print $tmp_v4 "\t\t\t$line,\n";
+			$added_ipv4++;
                 } else {
-                    $result = `$nft add element ip6 blocklist ipv6 { $line }`;
+			print $tmp_v6 "\t\t\t$line,\n";
+			$added_ipv6++;
                 }
                 $added++;
-                $message = "added $line";
-                logging($message);
+		#$message = "added $line";
+		#logging($message);
             } else {
                 $skipped++;
             }
         } 
     } 
-
+    print $tmp_v4 "\t\t}
+\t}
+\tchain input {
+\t\ttype filter hook input priority 100; policy accept;
+\t\tip saddr \@ipv4 log prefix \"Blocklist Dropped: \" drop
+\t}
+}\n";
+    print $tmp_v6 "\t\t}
+\t}
+\tchain input {
+\t\ttype filter hook input priority 100; policy accept;
+\t\tip6 saddr \@ipv6 log prefix \"Blocklist Dropped: \" drop
+\t}
+}\n";
 }
 ######## END addIpsToBlocklist ######
 
-########## remIpsFromBlocklist ########
-## remove IPs from our blocklist     ##
-#######################################
-sub remIpsFromBlocklist {
-    # remove Ips that are in our whiteList
-    foreach $line (@whiteListArray) {
-        if ((exists $ipsetArray{"$line"}) && ($line ~~ @whiteListArray)) {
-            if (is_ipv4($line) || is_ipv6($line)) {
-                if(is_ipv4($line)) {
-                    $result = `$nft delete element ip blocklist ipv4 { $line }`;
-                } else {
-                    $result = `$nft delete element ip6 blocklist ipv6 { $line }`;
-                }
-                $message = "removed $line";
-                logging($message);
-                $removed++;
-            } else {
-            $skipped++;
-            }
-        }
+################## applyBlocklist ###################
+####          Apply temp NFtable files          #####
+#####################################################
+sub applyBlocklist {
+    if ( $added_ipv4 > 0)
+    {
+	    `$nft -f $tmp_v4`;
+            $message = "Added Blocklist for IPv4 to ruleset";
+            logging($message);
     }
-
-    foreach $line (@ipsetArray) {
-        if ((exists $fileArray{"$line"}) || ($line ~~ @blackListArray)) {
-            $skipped++;     
-        } else {
-            if (is_ipv4($line) || is_ipv6($line)) {
-                if(is_ipv4($line)) {
-                    $result = `$nft delete element ip blocklist ipv4 { $line }`;
-                } else {
-                    $result = `$nft delete element ip6 blocklist ipv6 { $line }`;
-                }
-                $message = "removed $line";
-                logging($message);
-                $removed++;
-            } else {
-                $skipped++;
-            }
-        }
+    if ( $added_ipv6 > 0)
+    {
+	    `$nft -f $tmp_v6`;
+            $message = "Added Blocklist for IPv6 to ruleset";
+            logging($message);
     }
 }
-
-######## END remIpsFromBlocklist ########
-
+############### END applyBlocklist ######################
 
 ################## cleanup ###################
 #### Cleanup: move tmp file to new place #####
@@ -328,7 +272,7 @@ sub cleanup {
     for (1..$count) {
         $result = `$rm $tmpDir/Blocklist_$_ && echo "Deleted file $tmpDir/Blocklist_$_" || echo "Can\t delete file $tmpDir/Blocklist_$_"`;
     }
-    $message = "We added $added, removed $removed, skipped $skipped Rules";
+    $message = "We added $added (IPv4 = $added_ipv4, IPv6 = $added_ipv6), removed $removed, skipped $skipped Rules";
     logging($message);
 }
 ############### END cleanup ######################
@@ -339,13 +283,15 @@ sub cleanup {
 ########################################
 
 sub cleanupAll {
-    if(`$nft list ruleset ip | $grep blocklist` =~ m/blocklist/ ) {
+    my $returnCode;
+    $returnCode = system("$nft list table ip blocklist > /dev/null 2> /dev/null");
+    if ( $returnCode == 0 ) {
 	`$nft delete table ip blocklist`;
     }
-    if(`$nft list ruleset ip6 | $grep blocklist` =~ m/blocklist/  ) {
+    $returnCode = system("$nft list table ip6 blocklist > /dev/null 2> /dev/null");
+    if ( $returnCode == 0 ) {
 	`$nft delete table ip6 blocklist`;
     }
-    exit;
 }
 
 ########################################
