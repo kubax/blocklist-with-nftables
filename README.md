@@ -4,6 +4,8 @@ Use at your own risk :)
 
 Written and tested on Debian Wheezy!
 
+Tested on Debian Buster.
+
 ## What it does ##
 This script automatically downloads blocklist from sources you can define (in the blocklist.pl).
 
@@ -17,6 +19,7 @@ This can be overruled by an white and blacklist you can define in the correspond
 
 Changes
 --------
+- V1.1.5: @pingou2712: add option to block foward connection too
 - V1.1.4: switch to nftables
 - V1.1.3: @Sheogorath-SI: increase maxelemt to fit more than 65536 entries
 - V1.1.2: @kubax: add support for ip6tables (iptables on Arch Linux refuses ipv6 rules)
@@ -65,6 +68,10 @@ The script uses various binarys like iptables, ipset. If the script complains th
 
         0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl > /dev/null
 
+	Or with blocking forward connection too:
+
+        0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl -f > /dev/null
+
 5. Create an logrotate for the logfile. E.g. under /etc/logrotate.d/blocklist
 
 		/var/log/blocklist
@@ -97,6 +104,10 @@ If you want to remove the iptables rules and ipset lists just run
 
 	./blocklist.pl -c
 
+## FORWARD CONNECTION ##
+If you want to block forward connection too, add the -f flag:
+
+	./blocklist.pl -f
 
 ## Credits ##
 
