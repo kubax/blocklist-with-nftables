@@ -56,6 +56,7 @@ my @days = qw(Sun Mon Tue Wed Thu Fri Sat Sun);
 my $TABLE = "blocklist";
 my $tmp_v4 = new File::Temp( UNLINK => 1);
 my $tmp_v6 = new File::Temp( UNLINK => 1);
+my $forwardOption = 0;
 
 &init();
 
@@ -65,11 +66,12 @@ my $tmp_v6 = new File::Temp( UNLINK => 1);
 #####################################
 
 sub init {
-    $opt = 'hc';
+    $opt = 'hcf';
     getopts( "$opt", \%opt );
     usage() if $opt{h};
     cleanupAll() if $opt{c};
     exit if $opt{c};
+    $forwardOption = 1 if $opt{f};
     # else start main subroutine
     main();
 }
@@ -234,15 +236,26 @@ sub addIpsToBlocklist {
 \tchain input {
 \t\ttype filter hook input priority 100; policy accept;
 \t\tip saddr \@ipv4 log prefix \"Blocklist Dropped: \" drop
-\t}
-}\n";
+\t}\n";
     print $tmp_v6 "\t\t}
 \t}
 \tchain input {
 \t\ttype filter hook input priority 100; policy accept;
 \t\tip6 saddr \@ipv6 log prefix \"Blocklist Dropped: \" drop
-\t}
-}\n";
+\t}\n";
+    if ($forwardOption == 1)
+    {
+        print $tmp_v4 "\tchain forward {
+        \t\ttype filter hook forward priority 100; policy accept;
+        \t\tip saddr \@ipv4 log prefix \"Blocklist Dropped(forward): \" drop
+        \t}\n";
+        print $tmp_v6 "\tchain forward {
+        \t\ttype filter hook forward priority 100; policy accept;
+        \t\tip6 saddr \@ipv6 log prefix \"Blocklist Dropped(forward): \" drop
+        \t}\n";
+    }
+    print $tmp_v4 "}\n";
+    print $tmp_v6 "}\n";
 }
 ######## END addIpsToBlocklist ######
 
