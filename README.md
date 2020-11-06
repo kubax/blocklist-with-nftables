@@ -19,7 +19,7 @@ This can be overruled by an white and blacklist you can define in the correspond
 
 Changes
 --------
-- V1.1.5: @pingou2712: add option to block foward connection too
+- V1.1.5: @pingou2712: add option to block forward connection too
 - V1.1.4: switch to nftables
 - V1.1.3: @Sheogorath-SI: increase maxelemt to fit more than 65536 entries
 - V1.1.2: @kubax: add support for ip6tables (iptables on Arch Linux refuses ipv6 rules)
