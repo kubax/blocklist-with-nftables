@@ -56,6 +56,10 @@ my @days = qw(Sun Mon Tue Wed Thu Fri Sat Sun);
 my $TABLE = "blocklist";
 my $tmp_v4 = new File::Temp( UNLINK => 1);
 my $tmp_v6 = new File::Temp( UNLINK => 1);
+my $tmp_ipv4 = "";
+my $tmp_ipv6 = "";
+my $tmp_bridge = new File::Temp( UNLINK => 1);
+my $bridgeOption = 0;
 
 &init();
 
@@ -65,11 +69,12 @@ my $tmp_v6 = new File::Temp( UNLINK => 1);
 #####################################
 
 sub init {
-    $opt = 'hc';
+    $opt = 'hcb';
     getopts( "$opt", \%opt );
     usage() if $opt{h};
     cleanupAll() if $opt{c};
     exit if $opt{c};
+    $bridgeOption = 1 if $opt{b};
     # else start main subroutine
     main();
 }
@@ -87,6 +92,9 @@ sub usage() {
     
     If you want to clean everything up run
     ./blocklist.pl -c
+
+    If you want block ip on bridge table run
+    ./blocklist.pl -b
 EOF
     exit;
 }
@@ -179,13 +187,13 @@ sub getBlackListArray {
 #################################
 
 sub addIpsToBlocklist {
-    print $tmp_v4 "table ip $TABLE {
-\tset ipv4 {
+
+    #Prepare ipv4 and ipv6 set
+    $tmp_ipv4 = "\tset ipv4 {
 \t\ttype ipv4_addr
 \t\tflags interval
 \t\telements = {\n";
-    print $tmp_v6 "table ip6 $TABLE {
-\tset ipv6 {
+    $tmp_ipv6 = "\tset ipv6 {
 \t\ttype ipv6_addr
 \t\tflags interval
 \t\telements = {\n";
@@ -195,10 +203,10 @@ sub addIpsToBlocklist {
         } else {
             if (is_ipv4($line) || is_ipv6($line)) {
                 if(is_ipv4($line)) {
-			print $tmp_v4 "\t\t\t$line,\n";
+			$tmp_ipv4 = "${tmp_ipv4}\t\t\t$line,\n";
 			$added_ipv4++;
                 } else {
-			print $tmp_v6 "\t\t\t$line,\n";
+			$tmp_ipv6 = "${tmp_ipv6}\t\t\t$line,\n";
 			$added_ipv6++;
                 }
                 $added++;
@@ -215,10 +223,10 @@ sub addIpsToBlocklist {
         } else {
             if (is_ipv4($line) || is_ipv6($line)) {
                 if(is_ipv4($line)) {
-			print $tmp_v4 "\t\t\t$line,\n";
+			$tmp_ipv4 = "${tmp_ipv4}\t\t\t$line,\n";
 			$added_ipv4++;
                 } else {
-			print $tmp_v6 "\t\t\t$line,\n";
+			$tmp_ipv6 = "${tmp_ipv6}\t\t\t$line,\n";
 			$added_ipv6++;
                 }
                 $added++;
@@ -229,20 +237,42 @@ sub addIpsToBlocklist {
             }
         } 
     } 
-    print $tmp_v4 "\t\t}
-\t}
-\tchain input {
+    $tmp_ipv4 = "${tmp_ipv4}\t\t}
+\t}\n";
+    $tmp_ipv6 = "${tmp_ipv6}\t\t}
+\t}\n";
+
+    # Build tmp_v4 and v4 OR tmp_bridge
+    if ( $bridgeOption == 0 )
+    {
+        print $tmp_v4 "table ip $TABLE {\n";
+	print $tmp_v4 "$tmp_ipv4";
+        print $tmp_v4 "\tchain input {
 \t\ttype filter hook input priority 100; policy accept;
 \t\tip saddr \@ipv4 log prefix \"Blocklist Dropped: \" drop
 \t}
 }\n";
-    print $tmp_v6 "\t\t}
-\t}
-\tchain input {
+
+        print $tmp_v6 "table ip6 $TABLE {\n";
+	print $tmp_v6 "$tmp_ipv6";
+        print $tmp_v6 "\tchain input {
 \t\ttype filter hook input priority 100; policy accept;
 \t\tip6 saddr \@ipv6 log prefix \"Blocklist Dropped: \" drop
 \t}
 }\n";
+
+    } else {
+        print $tmp_bridge "table bridge $TABLE {\n";
+	print $tmp_bridge "$tmp_ipv4";
+	print $tmp_bridge "$tmp_ipv6";
+        print $tmp_bridge "\tchain prerouting {
+\t\ttype filter hook prerouting priority 100; policy accept;
+\t\tip saddr \@ipv4 log prefix \"Blocklist Bridge Dropped: \" drop
+\t\tip6 saddr \@ipv6 log prefix \"Blocklist Bridge Dropped: \" drop
+\t}
+}\n";
+    }
+
 }
 ######## END addIpsToBlocklist ######
 
@@ -250,17 +280,27 @@ sub addIpsToBlocklist {
 ####          Apply temp NFtable files          #####
 #####################################################
 sub applyBlocklist {
-    if ( $added_ipv4 > 0)
+    if ( $bridgeOption == 0 )
     {
+        if ( $added_ipv4 > 0)
+        {
 	    `$nft -f $tmp_v4`;
             $message = "Added Blocklist for IPv4 to ruleset";
             logging($message);
-    }
-    if ( $added_ipv6 > 0)
-    {
+        }
+        if ( $added_ipv6 > 0)
+        {
 	    `$nft -f $tmp_v6`;
             $message = "Added Blocklist for IPv6 to ruleset";
             logging($message);
+        }
+    } else {
+        if ( $added_ipv4 + $added_ipv6 > 0)
+        {
+	    `$nft -f $tmp_bridge`;
+            $message = "Added Bridge Blocklist for IPv4/IPv6 to ruleset";
+            logging($message);
+	}
     }
 }
 ############### END applyBlocklist ######################
@@ -291,6 +331,10 @@ sub cleanupAll {
     $returnCode = system("$nft list table ip6 blocklist > /dev/null 2> /dev/null");
     if ( $returnCode == 0 ) {
 	`$nft delete table ip6 blocklist`;
+    }
+    $returnCode = system("$nft list table bridge blocklist > /dev/null 2> /dev/null");
+    if ( $returnCode == 0 ) {
+	`$nft delete table bridge blocklist`;
     }
 }
 
