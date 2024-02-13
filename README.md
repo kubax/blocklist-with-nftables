@@ -2,7 +2,7 @@ blocklist-with-nftables
 ====================
 Use at your own risk :)
 
-Tested on Debian Buster.
+Tested on Debian Bookworm.
 
 ## What it does ##
 This script automatically downloads blocklist from sources you can define (in the blocklist.pl).
@@ -17,6 +17,7 @@ This can be overruled by an white and blacklist you can define in the correspond
 
 Changes
 --------
+- V1.1.7: @pingou2712: Update README.md in order to include systemd
 - V1.1.6: @pingou2712: add option to block bridge instead
 - V1.1.5: @kubax: greatly improved speed. switching to nft -f instead of pushing every
 - V1.1.4: switch to nftables
@@ -63,13 +64,7 @@ The script uses various binarys like iptables, ipset. If the script complains th
 
         my @listUrl = ("http://lists.blocklist.de/lists/all.txt", "http://www.infiltrated.net/blacklisted", "http://www.superblocksite.org/anotherBlocklist.txt");
 
-4. Create an cronjob. I have and hourly cronjob in /etc/crontab
-
-        0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl > /dev/null
-
-	Or in order to block bridge instead:
-
-        0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl -b > /dev/null
+4. Schedule the script execution using either a cron job or systemd (see below).
 
 5. Create an logrotate for the logfile. E.g. under /etc/logrotate.d/blocklist
 
@@ -96,6 +91,55 @@ The script uses various binarys like iptables, ipset. If the script complains th
 That's it. If you want to manually run the script just cd to the folder where the script is located and run 
 
 	./blocklist.pl
+
+## Scheduling Execution
+### Using a Cron Job
+Create an cronjob. I have and hourly cronjob in /etc/crontab
+
+        0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl > /dev/null
+
+	Or in order to block bridge instead:
+
+        0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl -b > /dev/null
+
+### Using systemd
+Create `blocklist.service` and `blocklist.timer` in `/etc/systemd/system/`.
+
+In `blocklist.service`:
+
+```ini
+[Unit]
+Description=Run blocklist script
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/perl /path/to/the/script/blocklist.pl
+```
+
+In `blocklist.timer`:
+
+```ini
+[Unit]
+Description=Timer for blocklist script
+
+[Timer]
+# Start 1 minute after boot
+OnBootSec=1min
+# Execute every hour
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable and start the timer:
+
+```bash
+sudo systemctl enable blocklist.timer
+sudo systemctl start blocklist.timer
+```
+
+To use the bridge blocking option with systemd, modify `ExecStart` in `blocklist.service` to include `-b`.
 
 ## CLEANUP ##
 If you want to remove the iptables rules and ipset lists just run
