@@ -17,7 +17,7 @@ This can be overruled by an white and blacklist you can define in the correspond
 
 Changes
 --------
-- V1.1.8: @pingou2712: add option to block nat instead
+- V1.1.8: @pingou2712: add option to block nat instead and add files and script for systemd
 - V1.1.7: @pingou2712: Update README.md in order to include systemd
 - V1.1.6: @pingou2712: add option to block bridge instead
 - V1.1.5: @kubax: greatly improved speed. switching to nft -f instead of pushing every
