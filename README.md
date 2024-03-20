@@ -140,6 +140,7 @@ sudo /etc/blocklist/systemd/create_symlinks.sh
 Enable and start the timer:
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable blocklist.timer
 sudo systemctl start blocklist.timer
 ```
@@ -178,6 +179,7 @@ WantedBy=timers.target
 Enable and start the timer:
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable blocklist.timer
 sudo systemctl start blocklist.timer
 ```
