@@ -1,0 +1,11 @@
+[Unit]
+Description=Timer for blocklist script
+
+[Timer]
+# Démarrer 1 minute après le démarrage
+OnBootSec=1min
+# Exécuter ensuite toutes les heures
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

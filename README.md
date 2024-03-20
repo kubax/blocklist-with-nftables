@@ -17,6 +17,7 @@ This can be overruled by an white and blacklist you can define in the correspond
 
 Changes
 --------
+- V1.1.8: @pingou2712: add option to block nat instead
 - V1.1.7: @pingou2712: Update README.md in order to include systemd
 - V1.1.6: @pingou2712: add option to block bridge instead
 - V1.1.5: @kubax: greatly improved speed. switching to nft -f instead of pushing every
@@ -47,6 +48,20 @@ The script uses various binarys like iptables, ipset. If the script complains th
 	$ENV{'PATH'}= '/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin';
 
 (You can find out where your binarys are with "which" e.g. "which iptables")
+
+## IP Blocking Strategies
+
+### Blocking IPs at the Input Level (No Flag Required)
+
+The foundational defense mechanism involves blocking incoming malicious IPs right at the network interface level. This straightforward approach ensures immediate protection against external threats trying to infiltrate the system.
+
+### Pre-routing for Host and NAT (Use Flag -n)
+
+To secure both the host and manage NAT configurations, pre-routing rules are applied within the inet table. Utilizing the -n flag enables this dual-purpose protection, preventing malicious IPs from affecting the host and any internal networks operating behind NAT.
+
+### Bridge Pre-routing Protection (Use Flag -b)
+
+Activating the -b flag, our IP blocking system addresses scenarios involving virtual bridges linked to physical interfaces. This setup guarantees comprehensive defense for both the host and virtual machines equipped with real IP addresses, fortifying the network against unauthorized access through these bridges.
 
 ## INSTALL ##
 
@@ -102,7 +117,28 @@ Create an cronjob. I have and hourly cronjob in /etc/crontab
 
         0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl -b > /dev/null
 
+    Or in order to block nat instead:
+
+        0 */1   * * *   root    /usr/bin/perl /path/to/the/script/blocklist.pl -n > /dev/null
+
 ### Using systemd
+
+#### Automated Approach
+
+The script `/etc/blocklist/systemd/create_symlinks.sh` is designed to manage the creation or replacement of symbolic links for `blocklist.service` and `blocklist.timer` within the systemd system structure. 
+
+It checks for existing symbolic links in `/etc/systemd/system/` and offers the user an option to replace them if they already exist. This ensures that the systemd service and timer are correctly linked to their definitions in the `/etc/blocklist/systemd/` directory.
+
+It's important to note that this script operates under the assumption that it resides within `/etc/blocklist/systemd/` and  that the systemd service is configured with the `-n` flag by default, aligning with the general use case.
+
+To execute the script, simply navigate to its directory and run the following command in your terminal:
+
+```bash
+sudo /etc/blocklist/systemd/create_symlinks.sh
+```
+
+#### Manual Method
+
 Create `blocklist.service` and `blocklist.timer` in `/etc/systemd/system/`.
 
 In `blocklist.service`:
@@ -140,10 +176,10 @@ sudo systemctl start blocklist.timer
 ```
 
 To use the bridge blocking option with systemd, modify `ExecStart` in `blocklist.service` to include `-b`.
+To use the nat blocking option with systemd, modify `ExecStart` in `blocklist.service` to include `-n`.
 
 ## CLEANUP ##
 If you want to remove the iptables rules and ipset lists just run
-
 
 	./blocklist.pl -c
 
@@ -151,6 +187,10 @@ If you want to remove the iptables rules and ipset lists just run
 If you want to block bridge instead, add the -b flag:
 
 	./blocklist.pl -b
+
+If you want to block nat instead, add the -n flag:
+
+	./blocklist.pl -n
 
 ## Credits ##
 
