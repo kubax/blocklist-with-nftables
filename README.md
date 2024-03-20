@@ -137,6 +137,13 @@ To execute the script, simply navigate to its directory and run the following co
 sudo /etc/blocklist/systemd/create_symlinks.sh
 ```
 
+Enable and start the timer:
+
+```bash
+sudo systemctl enable blocklist.timer
+sudo systemctl start blocklist.timer
+```
+
 #### Manual Method
 
 Create `blocklist.service` and `blocklist.timer` in `/etc/systemd/system/`.
