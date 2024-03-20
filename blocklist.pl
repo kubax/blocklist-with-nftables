@@ -58,8 +58,8 @@ my $tmp_v4 = new File::Temp( UNLINK => 1);
 my $tmp_v6 = new File::Temp( UNLINK => 1);
 my $tmp_ipv4 = "";
 my $tmp_ipv6 = "";
-my $tmp_bridge = new File::Temp( UNLINK => 1);
-my $bridgeOption = 0;
+my $tmp_bridge_or_nat = new File::Temp( UNLINK => 1);
+my $bridge_nat_Option = 0;
 
 &init();
 
@@ -69,12 +69,13 @@ my $bridgeOption = 0;
 #####################################
 
 sub init {
-    $opt = 'hcb';
+    $opt = 'hcbn';
     getopts( "$opt", \%opt );
     usage() if $opt{h};
     cleanupAll() if $opt{c};
     exit if $opt{c};
-    $bridgeOption = 1 if $opt{b};
+    $bridge_nat_Option = 1 if $opt{b};
+    $bridge_nat_Option = 2 if $opt{n};
     # else start main subroutine
     main();
 }
@@ -95,6 +96,10 @@ sub usage() {
 
     If you want block ip on bridge table run
     ./blocklist.pl -b
+
+    If you want block ip on inet table prerouting to protect nat run
+    ./blocklist.pl -n
+
 EOF
     exit;
 }
@@ -243,7 +248,7 @@ sub addIpsToBlocklist {
 \t}\n";
 
     # Build tmp_v4 and v4 OR tmp_bridge
-    if ( $bridgeOption == 0 )
+    if ( $bridge_nat_Option == 0 )
     {
         print $tmp_v4 "table ip $TABLE {\n";
 	print $tmp_v4 "$tmp_ipv4";
@@ -261,18 +266,27 @@ sub addIpsToBlocklist {
 \t}
 }\n";
 
-    } else {
-        print $tmp_bridge "table bridge $TABLE {\n";
-	print $tmp_bridge "$tmp_ipv4";
-	print $tmp_bridge "$tmp_ipv6";
-        print $tmp_bridge "\tchain prerouting {
+    } elsif ( $bridge_nat_Option == 1 ) {
+        print $tmp_bridge_or_nat "table bridge $TABLE {\n";
+	print $tmp_bridge_or_nat "$tmp_ipv4";
+	print $tmp_bridge_or_nat "$tmp_ipv6";
+        print $tmp_bridge_or_nat "\tchain prerouting {
 \t\ttype filter hook prerouting priority 100; policy accept;
 \t\tip saddr \@ipv4 log prefix \"Blocklist Bridge Dropped: \" drop
 \t\tip6 saddr \@ipv6 log prefix \"Blocklist Bridge Dropped: \" drop
 \t}
 }\n";
+    } else {
+        print $tmp_bridge_or_nat "table inet $TABLE {\n";
+	print $tmp_bridge_or_nat "$tmp_ipv4";
+	print $tmp_bridge_or_nat "$tmp_ipv6";
+        print $tmp_bridge_or_nat "\tchain prerouting {
+\t\ttype filter hook prerouting priority 100; policy accept;
+\t\tip saddr \@ipv4 log prefix \"Blocklist Prerouting Dropped: \" drop
+\t\tip6 saddr \@ipv6 log prefix \"Blocklist Prerouting Dropped: \" drop
+\t}
+}\n";
     }
-
 }
 ######## END addIpsToBlocklist ######
 
@@ -280,7 +294,7 @@ sub addIpsToBlocklist {
 ####          Apply temp NFtable files          #####
 #####################################################
 sub applyBlocklist {
-    if ( $bridgeOption == 0 )
+    if ( $bridge_nat_Option == 0 )
     {
         if ( $added_ipv4 > 0)
         {
@@ -297,8 +311,8 @@ sub applyBlocklist {
     } else {
         if ( $added_ipv4 + $added_ipv6 > 0)
         {
-	    `$nft -f $tmp_bridge`;
-            $message = "Added Bridge Blocklist for IPv4/IPv6 to ruleset";
+	    `$nft -f $tmp_bridge_or_nat`;
+            $message = "Added Bridge or NAT Blocklist for IPv4/IPv6 to ruleset";
             logging($message);
 	}
     }
@@ -335,6 +349,10 @@ sub cleanupAll {
     $returnCode = system("$nft list table bridge blocklist > /dev/null 2> /dev/null");
     if ( $returnCode == 0 ) {
 	`$nft delete table bridge blocklist`;
+    }
+    $returnCode = system("$nft list table inet blocklist > /dev/null 2> /dev/null");
+    if ( $returnCode == 0 ) {
+	`$nft delete table inet blocklist`;
     }
 }
 

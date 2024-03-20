@@ -1,0 +1,6 @@
+[Unit]
+Description=Run blocklist script
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/perl /etc/blocklist/blocklist.pl -n
