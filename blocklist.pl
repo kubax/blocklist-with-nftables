@@ -312,7 +312,7 @@ sub applyBlocklist {
         if ( $added_ipv4 + $added_ipv6 > 0)
         {
 	    `$nft -f $tmp_bridge_or_nat`;
-            $message = "Added Bridge Blocklist for IPv4/IPv6 to ruleset";
+            $message = "Added Bridge or NAT Blocklist for IPv4/IPv6 to ruleset";
             logging($message);
 	}
     }
