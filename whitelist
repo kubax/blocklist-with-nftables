@@ -1,3 +1,23 @@
-# IPV4/IPV6 Whitelist just add ips
+# IPV4/IPV6 Whitelist just add IP addresses or CIDR blocks to this file, one per line.
+# Lines starting with # are comments and will be ignored.
 #
 # e.g. 2.2.2.2
+
+# Private IP ranges (https://en.wikipedia.org/wiki/Private_network#Private_IPv4_address_spaces)
+#10.0.0.0/8      # 10.0.0.0 - 10.255.255.255
+#172.16.0.0/12   # 172.16.0.0 - 172.31.255.255
+#192.168.0.0/16  # 192.168.0.0 - 192.168.255.255
+#169.254.0.0/16  # 169.254.0.0 - 169.254.255.255
+
+# Loopback addresses
+#127.0.0.0/8     # 127.0.0.0 - 127.255.255.255
+
+# IPv6 equivalents
+#::1/128         # Loopback
+#fc00::/7        # Unique local addresses
+#fe80::/10       # Link-local addresses
+#ff00::/8        # Multicast
+#ff02::/16       # Link-local multicast
+#ff05::/16       # Site-local multicast
+#ff08::/16       # Organization-local multicast
+#ff0e::/16       # Global multicast

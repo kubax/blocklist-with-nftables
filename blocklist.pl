@@ -9,7 +9,8 @@ use File::Path qw(make_path);
 use File::Temp qw(tempfile);
 use Getopt::Long qw(GetOptions);
 use HTTP::Tiny;
-use Socket qw(AF_INET AF_INET6 inet_pton);
+use Socket qw(AF_INET AF_INET6 inet_pton inet_ntop);
+use Math::BigInt;
 
 #################################################################
 ###### Script to parse blocklists. Block new IPs and       ######
@@ -83,9 +84,9 @@ sub init {
     while (my $line = <$cfg>) {
         chomp $line;
         $line =~ s/^\s+|\s+$//g;
-        next if $line eq '';
-        next if $line =~ /^\s*#/;
-        $line =~ s/\s*#.*$//;    # strip inline comments
+            next if $line eq '';
+            next if $line =~ /^\s*[#;]/;
+            $line =~ s/\s*[#;].*$//;    # strip inline comments (# or ;)
         next if $line =~ /^\s*$/;
         if ($line =~ /^([^=\s]+)\s*=\s*(.+)$/) {
             my ($k, $v) = ($1, $2);
@@ -117,7 +118,7 @@ sub init {
     print "  - $_\n" for @list_url;
     print "Log file: $log_file\n";
     print "Whitelist file: $white_list\n";
-    print "Blacklist file: $black_list\n";
+    print "Blacklist file: $black_list\n\n";
 
     main();
 }
@@ -202,12 +203,15 @@ sub read_list_file {
         chomp $line;
         $line =~ s/^\s+|\s+$//g;
         next if $line eq '';
-        $line =~ s/^\s*#.*$//;    # skip full-line comments
-        $line =~ s/\s*[#;].*$//;  # strip inline comments
+        next if $line =~ /^\s*[#;]/;   # skip full-line comments starting with # or ;
+        $line =~ s/\s*[#;].*$//;       # strip inline comments (# or ;)
         $line =~ s/^\s+|\s+$//g;
         next if $line eq '';
         push @lines, $line;
     }
+    # print the number of entries read for verification
+    logging("Read " . scalar(@lines) . " entries from $path");
+    close $fh or die "Could not close $path: $!";
     return @lines;
 }
 
@@ -224,13 +228,13 @@ sub download_blocklists {
         for my $line (split /\R/, $response->{content}) {
             $line =~ s/^\s+|\s+$//g;
             next if $line eq '';
-            $line =~ s/^\s*#.*$//;    # skip commented lines
-            $line =~ s/\s*#.*$//;     # strip inline comments
+            next if $line =~ /^\s*[#;]/;   # skip commented lines starting with # or ;
+            $line =~ s/\s*[#;].*$//;       # strip inline comments (# or ;)
             $line =~ s/^\s+|\s+$//g;
             next if $line eq '';
             push @entries, $line;
         }
-        print "Downloaded blocklist from $url\n";
+        logging("Downloaded blocklist from $url");
     }
 
     return @entries;
@@ -238,35 +242,342 @@ sub download_blocklists {
 
 sub collect_blocklist_entries {
     my ($blocklist, $blacklist, $whitelist) = @_;
-    my %whitelist = map { $_ => 1 } @$whitelist;
-    my @ipv4;
-    my @ipv6;
+    # build whitelist structures for containment checks
+    my @wl = @$whitelist;
+    my (@wl4_singles, @wl4_cidrs, @wl6_singles, @wl6_cidrs);
+    for my $w (@wl) {
+        next unless defined $w;
+        $w =~ s/^\s+|\s+$//g;
+        next if $w eq '';
+        if ($w =~ /\//) {
+            if (is_ipv4($w)) { push @wl4_cidrs, $w } elsif (is_ipv6($w)) { push @wl6_cidrs, $w }
+        } else {
+            if (is_ipv4($w)) { push @wl4_singles, $w } elsif (is_ipv6($w)) { push @wl6_singles, $w }
+        }
+    }
+
+    my @wl4_cidr_structs = map { my ($s,$e)=cidr_to_range($_); { start => $s, end => $e } } @wl4_cidrs;
+    my @wl6_cidr_structs = map { my ($s,$e)=cidr_to_range($_); { start => $s, end => $e } } @wl6_cidrs;
+
+    my @raw4;
+    my @raw6;
 
     for my $line (uniq(@$blacklist, @$blocklist)) {
         next unless defined $line;
         $line =~ s/^\s+|\s+$//g;
-        # skip empty or commented
         next if $line eq '';
 
-        if ($whitelist{$line}) {
+        # skip exact whitelist matches quickly
+        if (grep { $_ eq $line } @wl4_singles, @wl6_singles) {
             $stats{skipped}++;
             next;
         }
 
         if (is_ipv4($line)) {
-            push @ipv4, $line;
-            $stats{added}++;
-            $stats{added_ipv4}++;
+            my $packed = pack_ip($line);
+            if (ip_in_any_ranges($packed, @wl4_cidr_structs)) {
+                $stats{skipped}++;
+                next;
+            }
+            push @raw4, $line;
         } elsif (is_ipv6($line)) {
-            push @ipv6, $line;
-            $stats{added}++;
-            $stats{added_ipv6}++;
+            my $packed = pack_ip($line);
+            if (ip_in_any_ranges($packed, @wl6_cidr_structs)) {
+                $stats{skipped}++;
+                next;
+            }
+            push @raw6, $line;
         } else {
             $stats{skipped}++;
         }
     }
 
+    # normalize: remove duplicates, remove single IPs contained in CIDRs,
+    # and remove CIDRs that are fully contained in other CIDRs or that would
+    # block whitelist single IPs.
+    my @ipv4 = normalize_entries(\@raw4, \@wl4_singles, \@wl4_cidrs, 4);
+    my @ipv6 = normalize_entries(\@raw6, \@wl6_singles, \@wl6_cidrs, 6);
+
+    $stats{added_ipv4} = scalar @ipv4;
+    $stats{added_ipv6} = scalar @ipv6;
+    $stats{added} = $stats{added_ipv4} + $stats{added_ipv6};
+
     return (\@ipv4, \@ipv6);
+}
+
+sub normalize_entries {
+    my ($entries_ref, $wl_singles_ref, $wl_cidrs_ref, $family) = @_;
+    my @entries = @$entries_ref;
+    my %seen;
+    my (@singles, @cidrs);
+
+    # separate singles and cidrs, dedupe exact strings
+    for my $e (@entries) {
+        next unless defined $e;
+        $e =~ s/^\s+|\s+$//g;
+        next if $e eq '';
+        next if $seen{$e}++;
+        if ($e =~ /\//) { push @cidrs, $e } else { push @singles, $e }
+    }
+
+    # memoize packed IPs for whitelist singles and input singles
+    my %pack_cache;
+    my @wl_packed = sort { $a cmp $b } grep { defined } map { $pack_cache{$_} //= pack_ip($_) } grep { defined && length } @$wl_singles_ref;
+
+    # build cidr structs with packed ranges
+    my @cidr_structs;
+    for my $c (@cidrs) {
+        my ($start, $end) = cidr_to_range($c);
+        next unless defined $start;
+        push @cidr_structs, { cidr => $c, start => $start, end => $end };
+    }
+
+    # sort cidrs by start to allow linear scan for containment and overlap
+    @cidr_structs = sort { $a->{start} cmp $b->{start} } @cidr_structs;
+
+    # remove cidrs that would block any whitelist single or whitelist cidr using binary search
+    for my $c (@cidr_structs) {
+        next unless @wl_packed || @{$wl_cidrs_ref};
+        my $skip = 0;
+        if (@wl_packed) {
+            my $idx = lower_bound_pack(\@wl_packed, $c->{start});
+            for my $j ($idx-1, $idx) {
+                next if $j < 0 || $j > $#{\@wl_packed};
+                if (ip_in_range($wl_packed[$j], $c->{start}, $c->{end})) { $skip = 1; last }
+            }
+        }
+        if (!$skip && @{$wl_cidrs_ref}) {
+            my @wl_ranges = map { my ($s,$e)=cidr_to_range($_); { start => $s, end => $e } } @{$wl_cidrs_ref};
+            if (range_overlaps_any($c->{start}, $c->{end}, @wl_ranges)) {
+                $skip = 1;
+            }
+        }
+        $c->{skip} = 1 if $skip;
+    }
+
+    # linear sweep to remove cidrs contained in previous (non-skipped) cidr
+    my @kept;
+    for my $c (@cidr_structs) {
+        next if $c->{skip};
+        if (@kept) {
+            my $last = $kept[-1];
+            # if current is fully contained in last, skip it
+            if ($c->{start} ge $last->{start} && $c->{end} le $last->{end}) {
+                next;
+            }
+            # if overlaps partially, expand last end to cover both to avoid conflicts
+            if ($c->{start} le $last->{end}) {
+                $last->{end} = $c->{end} if $c->{end} gt $last->{end};
+                # we also mark current as merged so we won't output it
+                $c->{skip} = 1;
+                next;
+            }
+        }
+        push @kept, $c;
+    }
+
+    # produce final cidr list by converting merged/kept ranges into minimal CIDRs
+    my @final_cidrs;
+    my @kept_ranges;
+    for my $k (@kept) {
+        next if $k->{skip};
+        push @kept_ranges, { start => $k->{start}, end => $k->{end} };
+        push @final_cidrs, range_to_cidrs($k->{start}, $k->{end});
+    }
+
+    # remove singles that fall into any remaining cidr using binary search
+    my @final_singles;
+    for my $s (@singles) {
+        my $sp = $pack_cache{$s} //= pack_ip($s);
+        next unless defined $sp;
+        my $in = 0;
+        # binary search on kept_ranges by start
+        my $idx = lower_bound_ranges(\@kept_ranges, $sp);
+        for my $j ($idx-1, $idx) {
+            next if $j < 0 || $j > $#{\@kept_ranges};
+            if (ip_in_range($sp, $kept_ranges[$j]{start}, $kept_ranges[$j]{end})) { $in = 1; last }
+        }
+        push @final_singles, $s unless $in;
+    }
+
+    return (@final_cidrs, @final_singles);
+}
+
+sub pack_ip {
+    my ($ip) = @_;
+    return undef unless defined $ip && length $ip;
+    my $p = inet_pton(AF_INET, $ip);
+    return $p if defined $p;
+    return inet_pton(AF_INET6, $ip);
+}
+
+sub cidr_to_range {
+    my ($cidr) = @_;
+    return unless $cidr =~ m{^([^/]+)/(\d+)$};
+    my ($ip, $prefix) = ($1, $2);
+    my $p = pack_ip($ip);
+    return unless defined $p;
+    my $len = length $p;    # 4 or 16
+
+    # build mask bytes
+    my @mask;
+    my $bits = $prefix;
+    for my $i (1..$len) {
+        if ($bits >= 8) { push @mask, 0xFF; $bits -= 8 }
+        elsif ($bits <= 0) { push @mask, 0x00 }
+        else { push @mask, ((0xFF << (8 - $bits)) & 0xFF); $bits = 0 }
+    }
+
+    # compute network base (start) and end
+    my $start = '';
+    my $end = '';
+    for my $i (0..$len-1) {
+        my $b = ord(substr($p, $i, 1));
+        my $m = $mask[$i];
+        my $nb = $b & $m;
+        my $eb = $nb | (~$m & 0xFF);
+        $start .= chr($nb);
+        $end   .= chr($eb);
+    }
+
+    return ($start, $end);
+}
+
+sub ip_in_range {
+    my ($ip_packed, $start, $end) = @_;
+    return 0 unless defined $ip_packed && defined $start && defined $end;
+    return ($ip_packed ge $start && $ip_packed le $end) ? 1 : 0;
+}
+
+sub ip_in_any_ranges {
+    my ($ip_packed, @ranges) = @_;
+    return 0 unless defined $ip_packed;
+    for my $range (@ranges) {
+        next unless defined $range->{start} && defined $range->{end};
+        return 1 if ip_in_range($ip_packed, $range->{start}, $range->{end});
+    }
+    return 0;
+}
+
+sub range_overlaps_any {
+    my ($start, $end, @ranges) = @_;
+    return 0 unless defined $start && defined $end;
+    for my $range (@ranges) {
+        next unless defined $range->{start} && defined $range->{end};
+        return 1 if !($end lt $range->{start} || $range->{end} lt $start);
+    }
+    return 0;
+}
+
+sub cidr_contains {
+    my ($outer, $inner) = @_; # both are {start =>..., end=>...}
+    return 0 unless defined $outer && defined $inner;
+    return ($inner->{start} ge $outer->{start} && $inner->{end} le $outer->{end}) ? 1 : 0;
+}
+
+# lower_bound for packed strings array: first index with value >= target
+sub lower_bound_pack {
+    my ($arr_ref, $target) = @_;
+    my $lo = 0;
+    my $hi = scalar(@$arr_ref);
+    while ($lo < $hi) {
+        my $mid = int(($lo + $hi) / 2);
+        if ($arr_ref->[$mid] lt $target) { $lo = $mid + 1 } else { $hi = $mid }
+    }
+    return $lo;
+}
+
+# lower_bound for ranges array (each element {start=>..., end=>...}), compare by start
+sub lower_bound_ranges {
+    my ($arr_ref, $target) = @_;
+    my $lo = 0;
+    my $hi = scalar(@$arr_ref);
+    while ($lo < $hi) {
+        my $mid = int(($lo + $hi) / 2);
+        if ($arr_ref->[$mid]{start} lt $target) { $lo = $mid + 1 } else { $hi = $mid }
+    }
+    return $lo;
+}
+
+sub packed_to_bigint {
+    my ($packed) = @_;
+    return unless defined $packed;
+    my $hex = unpack('H*', $packed);
+    return Math::BigInt->from_hex('0x' . $hex);
+}
+
+sub bigint_to_packed {
+    my ($bi, $len) = @_;
+    return unless defined $bi;
+    my $hex = $bi->as_hex(); # '0x...'
+    $hex =~ s/^0x//i;
+    $hex = '0' . $hex unless length($hex) % 2 == 0;
+    my $need = $len * 2;
+    $hex = ('0' x ($need - length($hex))) . $hex if length($hex) < $need;
+    return pack('H*', $hex);
+}
+
+sub range_to_cidrs {
+    my ($start_packed, $end_packed) = @_;
+    my $len = length $start_packed;
+    my @cidrs;
+
+    if ($len == 4) {
+        # IPv4: use native integers for speed and correctness
+        my $s = unpack('N', $start_packed);
+        my $e = unpack('N', $end_packed);
+        while ($s <= $e) {
+            # largest block aligned at s
+            my $tmp = $s;
+            my $tz = 0;
+            while (($tmp & 1) == 0 && $tz < 32) { $tmp >>= 1; $tz++; }
+            my $max_block = 1 << $tz;
+            # reduce block if it exceeds range
+            while ($s + $max_block - 1 > $e) {
+                $max_block >>= 1;
+            }
+            my $prefix = 32 - (int(log($max_block)/log(2)));
+            my $ip_text = sprintf('%d.%d.%d.%d', ($s>>24)&0xFF, ($s>>16)&0xFF, ($s>>8)&0xFF, $s&0xFF);
+            push @cidrs, "$ip_text/$prefix";
+            $s += $max_block;
+        }
+        return @cidrs;
+    }
+
+    # IPv6: BigInt path
+    my $maxbits = $len * 8;
+    my $start_bi = packed_to_bigint($start_packed);
+    my $end_bi = packed_to_bigint($end_packed);
+
+    while ($start_bi <= $end_bi) {
+        # find largest block aligned at start
+        my $max_pref = 0;
+        for (my $pref = 0; $pref <= $maxbits; $pref++) {
+            my $block = Math::BigInt->new(2)->bpow($maxbits - $pref);
+            # alignment check: start_bi % block == 0
+            my $mod = $start_bi->copy()->bmod($block);
+            last if $mod->is_pos();
+            $max_pref = $pref;
+        }
+        # adjust prefix so block does not exceed end
+        while (1) {
+            my $block = Math::BigInt->new(2)->bpow($maxbits - $max_pref);
+            my $block_end = $start_bi->copy()->badd($block)->bdec();
+            last if $block_end <= $end_bi;
+            $max_pref++;
+        }
+
+        # produce cidr for start_bi with prefix max_pref
+        my $packed = bigint_to_packed($start_bi, $len);
+        my $ip_text = inet_ntop(AF_INET6, $packed);
+        push @cidrs, "$ip_text/$max_pref";
+
+        # advance start_bi by block size
+        my $advance = Math::BigInt->new(2)->bpow($maxbits - $max_pref);
+        $start_bi = $start_bi->copy()->badd($advance);
+    }
+
+    return @cidrs;
 }
 
 sub is_ipv4 {
